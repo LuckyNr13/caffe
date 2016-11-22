@@ -38,6 +38,10 @@ class Classifier(caffe.Net):
             self.transformer.set_raw_scale(in_, raw_scale)
         if channel_swap is not None:
             self.transformer.set_channel_swap(in_, channel_swap)
+        if len(self.inputs)>1:
+            in2_ = self.inputs[1]
+            self.transformer2 = caffe.io.Transformer(
+                {in2_: self.blobs[in2_].data.shape})
 
         self.crop_dims = np.array(self.blobs[in_].data.shape[2:])
         if not image_dims:
@@ -89,6 +93,59 @@ class Classifier(caffe.Net):
             caffe_in[ix] = self.transformer.preprocess(self.inputs[0], in_)
         out = self.forward_all(**{self.inputs[0]: caffe_in})
         predictions = out[self.outputs[0]]
+
+        # For oversampling, average predictions across crops.
+        if oversample:
+            predictions = predictions.reshape((len(predictions) / 10, 10, -1))
+            predictions = predictions.mean(1)
+
+        return predictions
+
+    def predictFB(self, inputs,input2, oversample=True):
+        """
+        Predict classification probabilities of inputs.
+
+        Take
+        inputs: iterable of (H x W x K) input ndarrays.
+        oversample: average predictions across center, corners, and mirrors
+                    when True (default). Center-only prediction when False.
+
+        Give
+        predictions: (N x C) ndarray of class probabilities
+                     for N images and C classes.
+        """
+        # Scale to standardize input dimensions.
+        input_ = np.zeros((len(inputs),
+            self.image_dims[0], self.image_dims[1], inputs[0].shape[2]),
+            dtype=np.float32)
+        for ix, in_ in enumerate(inputs):
+            input_[ix] = caffe.io.resize_image(in_, self.image_dims)
+
+        if oversample:
+            # Generate center, corner, and mirrored crops.
+            input_ = caffe.io.oversample(input_, self.crop_dims)
+        else:
+            # Take center crop.
+            center = np.array(self.image_dims) / 2.0
+            crop = np.tile(center, (1, 2))[0] + np.concatenate([
+                -self.crop_dims / 2.0,
+                self.crop_dims / 2.0
+            ])
+            input_ = input_[:, crop[0]:crop[2], crop[1]:crop[3], :]
+
+        # Classify
+        caffe_in = np.zeros(np.array(input_.shape)[[0,3,1,2]],
+                            dtype=np.float32)
+        caffe_in2 = np.zeros((input2.shape[0],input2.shape[1],1,1),
+                            dtype=np.float32)
+        for ix, in_ in enumerate(input_):
+            caffe_in[ix] = self.transformer.preprocess(self.inputs[0], in_)
+        for ix, in_ in enumerate(input2):
+            caffe_in2[ix] = self.transformer2.preprocess(self.inputs[1], in_.reshape((input2.shape[1],1,1)))
+        out = self.forward_all(**{self.inputs[0]: caffe_in, self.inputs[1]: caffe_in2})
+        #import pdb
+        #pdb.set_trace()
+        predictions = out[self.outputs[0]]#.squeeze(axis=(2,3))
 
         # For oversampling, average predictions across crops.
         if oversample:
